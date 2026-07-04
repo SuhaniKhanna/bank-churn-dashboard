@@ -10,6 +10,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import joblib
+import shap
 import plotly.express as px
 import plotly.graph_objects as go
 from utils import build_feature_row, risk_band, estimate_annual_value, batch_score
@@ -59,6 +60,12 @@ def load_assets():
 
 
 model, feature_names, importance_df, comparison_df, sample_df = load_assets()
+
+@st.cache_resource
+def get_explainer(_model):
+    return shap.TreeExplainer(_model)
+
+explainer = get_explainer(model)
 
 # Pre-compute probabilities on the sample for the distribution tab
 X_sample = sample_df[feature_names]
@@ -172,6 +179,31 @@ with tab1:
         ))
         fig.update_layout(height=220, margin=dict(l=20, r=20, t=20, b=20))
         st.plotly_chart(fig, use_container_width=True)
+
+    st.divider()
+    st.markdown("**Why did the model score this customer this way?**")
+    st.caption(
+        "SHAP values for this specific customer. Bars pushing right increase churn risk, "
+        "bars pushing left decrease it, relative to the model's average prediction."
+    )
+
+    shap_values_row = explainer.shap_values(row)
+    shap_df = pd.DataFrame({
+        "feature": feature_names,
+        "shap_value": shap_values_row[0],
+    })
+    shap_df["abs_value"] = shap_df["shap_value"].abs()
+    shap_df = shap_df.sort_values("abs_value", ascending=False).head(8).sort_values("shap_value")
+
+    fig_shap = px.bar(
+        shap_df, x="shap_value", y="feature", orientation="h",
+        color="shap_value", color_continuous_scale=["#2E7D32", "#EEEEEE", "#C62828"],
+        color_continuous_midpoint=0,
+        labels={"shap_value": "Impact on churn probability (log-odds)", "feature": ""},
+    )
+    fig_shap.update_layout(height=340, showlegend=False)
+    fig_shap.update_coloraxes(showscale=False)
+    st.plotly_chart(fig_shap, use_container_width=True)
 
 # ===================== TAB 2: Probability Distribution =====================
 with tab2:
@@ -335,10 +367,9 @@ with tab4:
 with tab5:
     st.subheader("Customer Segmentation: Value vs. Risk")
     st.write(
-        "Customers grouped into a simple, explainable Value x Risk quadrant rather than "
-        "unsupervised clustering (e.g. K-Means), since a fixed, interpretable quadrant is easier "
-        "to act on and defend in a retention strategy meeting. K-Means-based segmentation is "
-        "noted as a future enhancement in the README."
+        "Customers are grouped into an explainable Value x Risk quadrant, then broken down "
+        "further by age band and product count so each segment can be understood at multiple "
+        "levels of granularity."
     )
 
     seg_df = sample_df.copy()
@@ -389,6 +420,38 @@ with tab5:
         "'High Value, High Risk' customers are the clearest retention priority: losing them costs "
         "the most, and they're the most likely to actually leave. 'Low Value, High Risk' customers "
         "may still be worth light-touch retention, but at lower cost per customer."
+    )
+
+    st.divider()
+    st.markdown("**Segment breakdown by age band and product count**")
+
+    seg_df["AgeBand"] = pd.cut(seg_df["Age"], bins=[17, 30, 40, 50, 60, 92],
+                                labels=["18-30", "31-40", "41-50", "51-60", "61+"])
+
+    b1, b2 = st.columns(2)
+    with b1:
+        age_risk = seg_df.groupby("AgeBand", observed=True)["ChurnProbability"].mean().reset_index()
+        fig_age = px.bar(age_risk, x="AgeBand", y="ChurnProbability",
+                          title="Average Churn Risk by Age Band",
+                          color="ChurnProbability", color_continuous_scale="Reds")
+        fig_age.update_layout(height=320, yaxis_tickformat=".0%")
+        fig_age.update_coloraxes(showscale=False)
+        st.plotly_chart(fig_age, use_container_width=True)
+    with b2:
+        prod_risk_seg = seg_df.groupby("NumOfProducts")["ChurnProbability"].mean().reset_index()
+        fig_prod_seg = px.bar(prod_risk_seg, x="NumOfProducts", y="ChurnProbability",
+                               title="Average Churn Risk by Product Count",
+                               color="ChurnProbability", color_continuous_scale="Reds")
+        fig_prod_seg.update_layout(height=320, yaxis_tickformat=".0%")
+        fig_prod_seg.update_coloraxes(showscale=False)
+        st.plotly_chart(fig_prod_seg, use_container_width=True)
+
+    st.caption(
+        "The quadrant view is deliberately simple and explainable: a fixed cutoff a retention "
+        "manager can act on directly, rather than a K-Means centroid that needs interpretation "
+        "before it's usable. These age-band and product-count cuts add granularity within that "
+        "same framework. Density-based clustering is a natural next iteration if finer-grained "
+        "micro-segments are needed later."
     )
 
 # ===================== TAB 6: Batch Scoring =====================

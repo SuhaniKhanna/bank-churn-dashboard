@@ -4,3 +4,4 @@ numpy==2.4.4
 scikit-learn==1.8.0
 plotly==6.8.0
 joblib==1.5.3
+shap==0.52.0
