@@ -12,7 +12,7 @@ import numpy as np
 import joblib
 import plotly.express as px
 import plotly.graph_objects as go
-from utils import build_feature_row, risk_band
+from utils import build_feature_row, risk_band, estimate_annual_value, batch_score
 
 st.set_page_config(
     page_title="Bank Churn Risk Intelligence",
@@ -105,11 +105,13 @@ with col4:
 st.write("")
 
 # ---------- Tabs: the 4 required modules ----------
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "Churn Risk Calculator",
     "Probability Distribution",
     "Feature Importance",
     "What-If Simulator",
+    "Customer Segments",
+    "Batch Scoring",
 ])
 
 # ===================== TAB 1: Churn Risk Calculator =====================
@@ -300,3 +302,139 @@ with tab4:
         st.warning("This scenario increases churn risk relative to the baseline.")
     else:
         st.info("This scenario has minimal impact on churn risk.")
+
+    st.divider()
+    st.markdown("**Retention ROI Estimate**")
+    st.caption(
+        "This dataset has no revenue or fee figures, so annual customer value below is an "
+        "illustrative estimate you can adjust, not a measured financial number."
+    )
+
+    roi1, roi2 = st.columns(2)
+    with roi1:
+        margin_rate = st.slider("Assumed net interest margin on balance", 0.5, 5.0, 2.0, step=0.5, key="roi_margin") / 100
+    with roi2:
+        fee_per_product = st.number_input("Assumed annual fee per product ($)", 0, 500, 60, step=10, key="roi_fee")
+
+    annual_value = sim_balance * margin_rate + sim_products * fee_per_product
+    expected_loss_before = annual_value * base["ChurnProbability"]
+    expected_loss_after = annual_value * sim_proba
+    savings = expected_loss_before - expected_loss_after
+
+    r1, r2, r3 = st.columns(3)
+    r1.metric("Est. Annual Customer Value", f"${annual_value:,.0f}")
+    r2.metric("Expected Value at Risk (Baseline)", f"${expected_loss_before:,.0f}")
+    r3.metric("Expected Value at Risk (Scenario)", f"${expected_loss_after:,.0f}", delta=f"${-savings:,.0f}", delta_color="inverse")
+
+    if savings > 0:
+        st.success(f"This scenario is estimated to protect roughly ${savings:,.0f} in expected annual value for this customer.")
+    elif savings < 0:
+        st.warning(f"This scenario is estimated to put roughly ${-savings:,.0f} more in expected annual value at risk.")
+
+# ===================== TAB 5: Customer Segments =====================
+with tab5:
+    st.subheader("Customer Segmentation: Value vs. Risk")
+    st.write(
+        "Customers grouped into a simple, explainable Value x Risk quadrant rather than "
+        "unsupervised clustering (e.g. K-Means), since a fixed, interpretable quadrant is easier "
+        "to act on and defend in a retention strategy meeting. K-Means-based segmentation is "
+        "noted as a future enhancement in the README."
+    )
+
+    seg_df = sample_df.copy()
+    seg_df["AnnualValue"] = seg_df["Balance"] * 0.02 + seg_df["NumOfProducts"] * 60
+    value_cutoff = seg_df["AnnualValue"].median()
+    risk_cutoff = 0.5
+
+    def assign_segment(row):
+        high_value = row["AnnualValue"] >= value_cutoff
+        high_risk = row["ChurnProbability"] >= risk_cutoff
+        if high_value and high_risk:
+            return "High Value, High Risk (Priority Retention)"
+        elif high_value and not high_risk:
+            return "High Value, Low Risk (Protect)"
+        elif not high_value and high_risk:
+            return "Low Value, High Risk (Low-Cost Monitoring)"
+        else:
+            return "Low Value, Low Risk (Maintain)"
+
+    seg_df["Segment"] = seg_df.apply(assign_segment, axis=1)
+
+    fig_seg = px.scatter(
+        seg_df.sample(min(1500, len(seg_df)), random_state=1),
+        x="AnnualValue", y="ChurnProbability", color="Segment",
+        opacity=0.55, labels={"AnnualValue": "Estimated Annual Customer Value ($)", "ChurnProbability": "Churn Probability"},
+        color_discrete_map={
+            "High Value, High Risk (Priority Retention)": "#C62828",
+            "High Value, Low Risk (Protect)": "#2E7D32",
+            "Low Value, High Risk (Low-Cost Monitoring)": "#F9A825",
+            "Low Value, Low Risk (Maintain)": "#90A4AE",
+        },
+    )
+    fig_seg.add_hline(y=risk_cutoff, line_dash="dash", line_color="gray")
+    fig_seg.add_vline(x=value_cutoff, line_dash="dash", line_color="gray")
+    fig_seg.update_layout(height=450)
+    st.plotly_chart(fig_seg, use_container_width=True)
+
+    seg_summary = seg_df.groupby("Segment").agg(
+        Customers=("ChurnProbability", "count"),
+        AvgRisk=("ChurnProbability", "mean"),
+        AvgValue=("AnnualValue", "mean"),
+    ).reset_index().sort_values("AvgRisk", ascending=False)
+    seg_summary["AvgRisk"] = seg_summary["AvgRisk"].map(lambda x: f"{x:.1%}")
+    seg_summary["AvgValue"] = seg_summary["AvgValue"].map(lambda x: f"${x:,.0f}")
+    st.dataframe(seg_summary, use_container_width=True, hide_index=True)
+
+    st.caption(
+        "'High Value, High Risk' customers are the clearest retention priority: losing them costs "
+        "the most, and they're the most likely to actually leave. 'Low Value, High Risk' customers "
+        "may still be worth light-touch retention, but at lower cost per customer."
+    )
+
+# ===================== TAB 6: Batch Scoring =====================
+with tab6:
+    st.subheader("Batch Customer Scoring")
+    st.write(
+        "Upload a CSV of customers to score churn risk for an entire portfolio at once, rather than "
+        "one customer at a time. Expected columns: CreditScore, Geography, Gender, Age, Tenure, "
+        "Balance, NumOfProducts, HasCrCard, IsActiveMember, EstimatedSalary."
+    )
+
+    uploaded_file = st.file_uploader("Upload customer CSV", type=["csv"], key="batch_upload")
+
+    sample_template = sample_df[["CreditScore", "Age", "Tenure", "Balance", "NumOfProducts",
+                                  "HasCrCard", "IsActiveMember", "EstimatedSalary"]].head(3).copy()
+    sample_template.insert(1, "Geography", ["France", "Germany", "Spain"])
+    sample_template.insert(2, "Gender", ["Female", "Male", "Female"])
+    st.download_button(
+        "Download a sample template CSV",
+        sample_template.to_csv(index=False),
+        file_name="churn_scoring_template.csv",
+        mime="text/csv",
+    )
+
+    if uploaded_file is not None:
+        try:
+            raw_upload = pd.read_csv(uploaded_file)
+            with st.spinner(f"Scoring {len(raw_upload)} customers..."):
+                scored = batch_score(raw_upload, model, feature_names)
+
+            st.success(f"Scored {len(scored)} customers.")
+            b1, b2, b3 = st.columns(3)
+            b1.metric("Avg. Churn Risk", f"{scored['ChurnProbability'].mean():.1%}")
+            b2.metric("High Risk Customers", int((scored['RiskBand'] == 'High').sum()))
+            b3.metric("Low Risk Customers", int((scored['RiskBand'] == 'Low').sum()))
+
+            st.dataframe(
+                scored.sort_values("ChurnProbability", ascending=False).style.format({"ChurnProbability": "{:.1%}"}),
+                use_container_width=True, hide_index=True
+            )
+
+            st.download_button(
+                "Download scored results",
+                scored.to_csv(index=False),
+                file_name="scored_customers.csv",
+                mime="text/csv",
+            )
+        except Exception as e:
+            st.error(f"Could not process this file: {e}")

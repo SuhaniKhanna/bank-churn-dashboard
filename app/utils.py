@@ -51,3 +51,50 @@ def risk_band(probability):
         return "Moderate", "#F9A825"
     else:
         return "High", "#C62828"
+
+
+def estimate_annual_value(balance, num_products, salary):
+    """Rough, clearly-labeled illustrative estimate of a customer's annual
+    value to the bank -- this dataset has no real revenue/fee data, so this
+    is an assumption-driven proxy (net interest margin on balance + a flat
+    per-product fee estimate), not a measured financial figure. Exposed as
+    editable assumptions in the UI rather than presented as fact.
+    """
+    interest_margin_rate = 0.02   # assumed net interest margin on balance
+    fee_per_product = 60          # assumed average annual fee per product held
+    return balance * interest_margin_rate + num_products * fee_per_product
+
+
+def batch_score(raw_df, model, feature_names):
+    """Takes a raw customer dataframe (same schema as the original dataset,
+    minus the target) and runs it through the same feature engineering used
+    in training, then scores it. Kept separate from build_feature_row (which
+    handles one manually-entered customer) since batch input arrives as a
+    full dataframe rather than individual widget values.
+    """
+    df = raw_df.copy()
+
+    required_cols = ["CreditScore", "Geography", "Gender", "Age", "Tenure",
+                      "Balance", "NumOfProducts", "HasCrCard", "IsActiveMember", "EstimatedSalary"]
+    missing = [c for c in required_cols if c not in df.columns]
+    if missing:
+        raise ValueError(f"Uploaded file is missing required columns: {missing}")
+
+    df["BalanceSalaryRatio"] = df["Balance"] / (df["EstimatedSalary"] + 1)
+    df["ProductDensity"] = df["NumOfProducts"] / (df["Tenure"] + 1)
+    df["EngagementProductScore"] = df["IsActiveMember"] * df["NumOfProducts"]
+    df["AgeTenureInteraction"] = df["Age"] * df["Tenure"]
+    df["IsZeroBalance"] = (df["Balance"] == 0).astype(int)
+
+    df_encoded = pd.get_dummies(df, columns=["Geography", "Gender"], drop_first=True)
+    for col in ["Geography_Germany", "Geography_Spain", "Gender_Male"]:
+        if col not in df_encoded.columns:
+            df_encoded[col] = 0
+
+    X = df_encoded[feature_names]
+    probabilities = model.predict_proba(X)[:, 1]
+
+    result = raw_df.copy()
+    result["ChurnProbability"] = probabilities
+    result["RiskBand"] = result["ChurnProbability"].apply(lambda p: risk_band(p)[0])
+    return result
